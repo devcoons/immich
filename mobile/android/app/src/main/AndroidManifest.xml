@@ -73,6 +73,19 @@
         <data android:mimeType="image/*" />
       </intent-filter>
 
+      <intent-filter android:label="View in Immich">
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+
+        <!-- Most common on modern Android -->
+        <data android:scheme="content" />
+        <!-- Optional: some sources still use file:// -->
+        <data android:scheme="file" />
+
+        <data android:mimeType="image/*" />
+        <data android:mimeType="video/*" />
+      </intent-filter>
+
       <intent-filter android:label="Upload to Immich">
         <action android:name="android.intent.action.SEND_MULTIPLE" />
         <category android:name="android.intent.category.DEFAULT" />

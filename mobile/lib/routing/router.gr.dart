@@ -1617,6 +1617,44 @@ class EditImageRouteArgs {
 }
 
 /// generated route for
+/// [ExternalFileViewerPage]
+class ExternalFileViewerRoute
+    extends PageRouteInfo<ExternalFileViewerRouteArgs> {
+  ExternalFileViewerRoute({
+    Key? key,
+    required String uri,
+    List<PageRouteInfo>? children,
+  }) : super(
+         ExternalFileViewerRoute.name,
+         args: ExternalFileViewerRouteArgs(key: key, uri: uri),
+         initialChildren: children,
+       );
+
+  static const String name = 'ExternalFileViewerRoute';
+
+  static PageInfo page = PageInfo(
+    name,
+    builder: (data) {
+      final args = data.argsAs<ExternalFileViewerRouteArgs>();
+      return ExternalFileViewerPage(key: args.key, uri: args.uri);
+    },
+  );
+}
+
+class ExternalFileViewerRouteArgs {
+  const ExternalFileViewerRouteArgs({this.key, required this.uri});
+
+  final Key? key;
+
+  final String uri;
+
+  @override
+  String toString() {
+    return 'ExternalFileViewerRouteArgs{key: $key, uri: $uri}';
+  }
+}
+
+/// generated route for
 /// [FailedBackupStatusPage]
 class FailedBackupStatusRoute extends PageRouteInfo<void> {
   const FailedBackupStatusRoute({List<PageRouteInfo>? children})
