@@ -139,27 +139,45 @@ class ExternalFileViewerPage extends HookConsumerWidget {
               return;
             }
 
-            dPrint(() => "[ExternalFileViewer] File exists! Size: ${file.lengthSync()} bytes");
-
-            // Read the bytes to ensure we can display it
-            try {
-              bytes = await file.readAsBytes();
-              imageBytes.value = bytes;
-              dPrint(() => "[ExternalFileViewer] Read ${bytes?.length ?? 0} bytes from file");
-            } catch (e) {
-              dPrint(() => "[ExternalFileViewer] ERROR reading file bytes: $e");
-              error.value = "Unable to read file: $e";
-              isLoading.value = false;
-              return;
-            }
-
-            // Check if it's a video based on extension
+            // Check if it's a video based on extension FIRST to avoid reading video bytes
             final extension = p.extension(path).toLowerCase();
             isVideo.value = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'].contains(extension);
 
             dPrint(() => "[ExternalFileViewer] File extension: $extension, isVideo: ${isVideo.value}");
-
             filePath.value = path;
+
+            // Only read bytes for images, not videos
+            if (!isVideo.value) {
+              dPrint(() => "[ExternalFileViewer] File exists! Size: ${file.lengthSync()} bytes");
+
+              // Read the bytes for image display
+              try {
+                bytes = await file.readAsBytes();
+                if (!isMounted) return;
+                imageBytes.value = bytes;
+                dPrint(() => "[ExternalFileViewer] Read ${bytes?.length ?? 0} bytes from file");
+
+                // Pre-decode image for better performance
+                try {
+                  final codec = await ui.instantiateImageCodec(bytes);
+                  final frame = await codec.getNextFrame();
+                  if (!isMounted) return;
+                  decodedImage.value = frame.image;
+                  dPrint(() => "[ExternalFileViewer] Image decoded successfully: ${frame.image.width}x${frame.image.height}");
+                } catch (e) {
+                  dPrint(() => "[ExternalFileViewer] Failed to pre-decode image: $e");
+                  // Continue anyway, will use Image.memory fallback
+                }
+              } catch (e) {
+                dPrint(() => "[ExternalFileViewer] ERROR reading file bytes: $e");
+                error.value = "Unable to read file: $e";
+                isLoading.value = false;
+                return;
+              }
+            } else {
+              dPrint(() => "[ExternalFileViewer] Skipping byte read for video file");
+            }
+
             dPrint(() => "[ExternalFileViewer] Set filePath to: $path");
           } else if (bytes != null && path == null) {
             // We have bytes from content URI but no path
@@ -433,19 +451,30 @@ class _ExternalVideoPlayer extends HookWidget {
     final error = useState<String?>(null);
     final videoInfo = useState<VideoInfo?>(null);
     final isPlaying = useState(false);
-    final showControls = useState(true);
+    final showControls = useState(false);
+    final isMounted = useRef(true);
 
     useEffect(() {
       dPrint(() => "[ExternalVideoPlayer] Initializing video player for: $filePath");
+      isMounted.value = true;
 
       return () {
         dPrint(() => "[ExternalVideoPlayer] Cleaning up video player");
-        controller.value?.stop();
+        isMounted.value = false;
+        final ctrl = controller.value;
+        if (ctrl != null) {
+          try {
+            ctrl.stop();
+            ctrl.dispose();
+          } catch (e) {
+            dPrint(() => "[ExternalVideoPlayer] Error during cleanup: $e");
+          }
+        }
       };
     }, [filePath]);
 
     void initController(NativeVideoPlayerController nc) async {
-      if (controller.value != null) {
+      if (controller.value != null || !isMounted.value) {
         return;
       }
 
@@ -455,7 +484,9 @@ class _ExternalVideoPlayer extends HookWidget {
         VideoSource source;
 
         if (filePath == "content_uri_image" || filePath.startsWith("content://")) {
-          error.value = "Cannot play video from content URI";
+          if (isMounted.value) {
+            error.value = "Cannot play video from content URI";
+          }
           return;
         }
 
@@ -464,7 +495,8 @@ class _ExternalVideoPlayer extends HookWidget {
           type: VideoSourceType.file,
         );
 
-        nc.onPlaybackReady.addListener(() {
+        void onPlaybackReady() {
+          if (!isMounted.value) return;
           dPrint(() => "[ExternalVideoPlayer] Video playback ready");
           final info = nc.videoInfo;
           if (info != null) {
@@ -472,29 +504,45 @@ class _ExternalVideoPlayer extends HookWidget {
             dPrint(() => "[ExternalVideoPlayer] Video size: ${info.width}x${info.height}");
           }
           isReady.value = true;
-          nc.play();
+          nc.play().catchError((e) {
+            dPrint(() => "[ExternalVideoPlayer] Error auto-playing video: $e");
+          });
           isPlaying.value = true;
-        });
+        }
 
-        nc.onPlaybackStatusChanged.addListener(() {
+        void onPlaybackStatusChanged() {
+          if (!isMounted.value) return;
           final playbackInfo = nc.playbackInfo;
           if (playbackInfo != null) {
             isPlaying.value = playbackInfo.status == PlaybackStatus.playing;
           }
-        });
+        }
 
-        nc.onError.addListener(() {
+        void onError() {
+          if (!isMounted.value) return;
           dPrint(() => "[ExternalVideoPlayer] Video playback error");
           error.value = "Video playback error";
-        });
+        }
+
+        nc.onPlaybackReady.addListener(onPlaybackReady);
+        nc.onPlaybackStatusChanged.addListener(onPlaybackStatusChanged);
+        nc.onError.addListener(onError);
 
         await nc.loadVideoSource(source);
-        controller.value = nc;
 
+        if (!isMounted.value) {
+          nc.stop();
+          nc.dispose();
+          return;
+        }
+
+        controller.value = nc;
         dPrint(() => "[ExternalVideoPlayer] Video loaded successfully");
       } catch (e) {
         dPrint(() => "[ExternalVideoPlayer] Error loading video: $e");
-        error.value = "Failed to load video: $e";
+        if (isMounted.value) {
+          error.value = "Failed to load video: $e";
+        }
       }
     }
 
@@ -537,7 +585,7 @@ class _ExternalVideoPlayer extends HookWidget {
 
     void togglePlayPause() async {
       final ctrl = controller.value;
-      if (ctrl == null) return;
+      if (ctrl == null || !isMounted.value) return;
 
       try {
         if (isPlaying.value) {
@@ -552,7 +600,7 @@ class _ExternalVideoPlayer extends HookWidget {
 
     void restart() async {
       final ctrl = controller.value;
-      if (ctrl == null) return;
+      if (ctrl == null || !isMounted.value) return;
 
       try {
         await ctrl.seekTo(0);
@@ -571,51 +619,88 @@ class _ExternalVideoPlayer extends HookWidget {
       ),
       body: SafeArea(
         child: Center(
-          child: GestureDetector(
+                   child: GestureDetector(
             onTap: () {
+              dPrint(() => "[ExternalVideoPlayer] Video tapped, toggling controls from ${showControls.value} to ${!showControls.value}");
               showControls.value = !showControls.value;
             },
-            child: AspectRatio(
-              aspectRatio: aspectRatio,
-              child: Stack(
-                children: [
-                  NativeVideoPlayerView(
-                    onViewReady: initController,
-                  ),
-                  if (!isReady.value)
-                    const Center(
-                      child: CircularProgressIndicator(color: Colors.white),
-                    ),
-                  // Video controls overlay
-                  if (isReady.value && showControls.value)
-                    Container(
-                      color: Colors.black26,
-                      child: Center(
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              // Video player with proper aspect ratio
+              AspectRatio(
+                aspectRatio: aspectRatio,
+                child: NativeVideoPlayerView(
+                  onViewReady: initController,
+                ),
+              ),
+              // Tap detector overlay (invisible, captures taps)
+     
+              // Loading indicator
+              if (!isReady.value)
+                const Center(
+                  child: CircularProgressIndicator(color: Colors.white),
+                ),
+              // Video controls overlay - positioned at bottom
+              if (isReady.value && showControls.value)
+                Positioned(
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  child: IgnorePointer(
+                    ignoring: false,
+                    child: Container(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.bottomCenter,
+                            end: Alignment.topCenter,
+                            colors: [
+                              Colors.black.withOpacity(0.8),
+                              Colors.black.withOpacity(0.6),
+                              Colors.transparent,
+                            ],
+                          ),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             // Restart button
-                            IconButton(
-                              icon: const Icon(Icons.replay, size: 40),
-                              color: Colors.white,
-                              onPressed: restart,
-                            ),
-                            const SizedBox(width: 20),
-                            // Play/Pause button
-                            IconButton(
-                              icon: Icon(
-                                isPlaying.value ? Icons.pause : Icons.play_arrow,
-                                size: 50,
+                            Container(
+                              decoration: BoxDecoration(
+                                color: Colors.black45,
+                                shape: BoxShape.circle,
                               ),
-                              color: Colors.white,
-                              onPressed: togglePlayPause,
+                              child: IconButton(
+                                icon: const Icon(Icons.replay, size: 32),
+                                color: Colors.white,
+                                onPressed: restart,
+                                tooltip: 'Restart',
+                              ),
+                            ),
+                            const SizedBox(width: 24),
+                            // Play/Pause button
+                            Container(
+                              decoration: BoxDecoration(
+                                color: Colors.black45,
+                                shape: BoxShape.circle,
+                              ),
+                              child: IconButton(
+                                icon: Icon(
+                                  isPlaying.value ? Icons.pause : Icons.play_arrow,
+                                  size: 40,
+                                ),
+                                color: Colors.white,
+                                onPressed: togglePlayPause,
+                                tooltip: isPlaying.value ? 'Pause' : 'Play',
+                              ),
                             ),
                           ],
                         ),
                       ),
                     ),
-                ],
-              ),
+                  ),
+              ],
             ),
           ),
         ),
