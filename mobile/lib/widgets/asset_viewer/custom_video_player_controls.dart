@@ -13,7 +13,7 @@ import 'package:immich_mobile/widgets/common/delayed_loading_indicator.dart';
 class CustomVideoPlayerControls extends HookConsumerWidget {
   final Duration hideTimerDuration;
 
-  const CustomVideoPlayerControls({super.key, this.hideTimerDuration = const Duration(seconds: 5)});
+  const CustomVideoPlayerControls({super.key, this.hideTimerDuration = const Duration(seconds: 2)});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -79,28 +79,33 @@ class CustomVideoPlayerControls extends HookConsumerWidget {
 
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: showControlsAndStartHideTimer,
-      child: AbsorbPointer(
-        absorbing: !showControls,
-        child: Stack(
-          children: [
-            if (showBuffering)
-              const Center(child: DelayedLoadingIndicator(fadeInDuration: Duration(milliseconds: 400)))
-            else
-              GestureDetector(
-                onTap: () => ref.read(showControlsProvider.notifier).show = false,
-                child: CenterPlayButton(
-                  backgroundColor: Colors.black54,
-                  iconColor: Colors.white,
-                  isFinished: state == VideoPlaybackState.completed,
-                  isPlaying:
-                      state == VideoPlaybackState.playing || (cast.isCasting && cast.castState == CastState.playing),
-                  show: assetIsVideo && showControls,
-                  onPressed: togglePlay,
-                ),
+      onTap: () {
+        if (showControls) {
+          // When controls are visible, tapping anywhere on the video toggles play/pause
+          togglePlay();
+        } else {
+          // When controls are hidden, tapping shows them
+          showControlsAndStartHideTimer();
+        }
+      },
+      child: Stack(
+        children: [
+          if (showBuffering)
+            const Center(child: DelayedLoadingIndicator(fadeInDuration: Duration(milliseconds: 400)))
+          else if (assetIsVideo && showControls)
+            // Show the center play button when controls are visible
+            Center(
+              child: CenterPlayButton(
+                backgroundColor: Colors.black54,
+                iconColor: Colors.white,
+                isFinished: state == VideoPlaybackState.completed,
+                isPlaying:
+                    state == VideoPlaybackState.playing || (cast.isCasting && cast.castState == CastState.playing),
+                show: true,
+                onPressed: togglePlay,
               ),
-          ],
-        ),
+            ),
+        ],
       ),
     );
   }

@@ -2,6 +2,7 @@ package app.alextran.immich
 
 import android.content.Context
 import android.content.Intent
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -27,6 +28,14 @@ class MainActivity : FlutterFragmentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+
+    // Track if this is a cold start via VIEW intent
+    val isColdStartWithIntent = savedInstanceState == null &&
+                                intent?.action == Intent.ACTION_VIEW
+    if (isColdStartWithIntent) {
+      wasColdStartedViaIntent = true
+    }
+
     // If app was launched via ACTION_VIEW, this catches the cold start path.
     maybeHandleViewIntent(intent)
   }
@@ -108,6 +117,25 @@ class MainActivity : FlutterFragmentActivity() {
             result.error("INVALID", "URI string is null", null)
           }
         }
+        "getVideoMetadata" -> {
+          val uriString = call.argument<String>("uri")
+          if (uriString != null) {
+            try {
+              val uri = Uri.parse(uriString)
+              val metadata = getVideoMetadata(uri)
+              if (metadata != null) {
+                result.success(metadata)
+              } else {
+                result.error("UNAVAILABLE", "Could not read video metadata", null)
+              }
+            } catch (e: Exception) {
+              Log.e(TAG, "Failed to get video metadata: ${e.message}", e)
+              result.error("ERROR", "Failed to get video metadata: ${e.message}", null)
+            }
+          } else {
+            result.error("INVALID", "URI string is null", null)
+          }
+        }
         else -> result.notImplemented()
       }
     }
@@ -147,13 +175,57 @@ class MainActivity : FlutterFragmentActivity() {
     }
   }
 
+  private fun getVideoMetadata(uri: Uri): Map<String, Any>? {
+    val retriever = MediaMetadataRetriever()
+    return try {
+      // Set the data source based on URI scheme
+      if (uri.scheme == "content" || uri.scheme == "file") {
+        retriever.setDataSource(this, uri)
+      } else {
+        return null
+      }
+
+      val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+      val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
+      val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+
+      if (width != null && height != null) {
+        // Adjust dimensions based on rotation
+        val (finalWidth, finalHeight) = when (rotation) {
+          90, 270 -> Pair(height, width)  // Swap width and height for portrait videos
+          else -> Pair(width, height)
+        }
+
+        mapOf(
+          "width" to finalWidth,
+          "height" to finalHeight,
+          "rotation" to rotation
+        )
+      } else {
+        null
+      }
+    } catch (e: Exception) {
+      Log.e(TAG, "Error extracting video metadata: ${e.message}", e)
+      null
+    } finally {
+      try {
+        retriever.release()
+      } catch (e: Exception) {
+        Log.e(TAG, "Error releasing MediaMetadataRetriever: ${e.message}", e)
+      }
+    }
+  }
+
   private fun flushPendingViewIntent() {
     val channel = intentChannel ?: return
     val uri = pendingViewUri ?: return
     pendingViewUri = null
 
-    Log.d(TAG, "Flushing VIEW intent to Flutter: $uri")
-    channel.invokeMethod("viewUri", mapOf("uri" to uri))
+    Log.d(TAG, "Flushing VIEW intent to Flutter: $uri (coldStart: $wasColdStartedViaIntent)")
+    channel.invokeMethod("viewUri", mapOf(
+      "uri" to uri,
+      "wasColdStart" to wasColdStartedViaIntent
+    ))
   }
 
   companion object {
@@ -161,6 +233,7 @@ class MainActivity : FlutterFragmentActivity() {
     private const val INTENT_CHANNEL_NAME = "app.alextran.immich/intent"
     @Volatile private var intentChannel: MethodChannel? = null
     @Volatile private var pendingViewUri: String? = null
+    @Volatile private var wasColdStartedViaIntent: Boolean = false
 
     fun registerPlugins(ctx: Context, flutterEngine: FlutterEngine) {
       val messenger = flutterEngine.dartExecutor.binaryMessenger

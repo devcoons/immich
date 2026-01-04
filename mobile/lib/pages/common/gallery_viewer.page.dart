@@ -23,7 +23,9 @@ import 'package:immich_mobile/providers/asset_viewer/show_controls.provider.dart
 import 'package:immich_mobile/providers/asset_viewer/video_player_value_provider.dart';
 import 'package:immich_mobile/providers/cast.provider.dart';
 import 'package:immich_mobile/providers/haptic_feedback.provider.dart';
+import 'package:immich_mobile/providers/view_intent.provider.dart';
 import 'package:immich_mobile/services/app_settings.service.dart';
+import 'package:immich_mobile/utils/external_asset.dart';
 import 'package:immich_mobile/widgets/asset_grid/asset_grid_data_structure.dart';
 import 'package:immich_mobile/widgets/asset_viewer/advanced_bottom_sheet.dart';
 import 'package:immich_mobile/widgets/asset_viewer/bottom_gallery_bar.dart';
@@ -106,16 +108,25 @@ class GalleryViewerPage extends HookConsumerWidget {
         SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersive);
       }
 
-      // Delay this a bit so we can finish loading the page
-      Timer(const Duration(milliseconds: 400), () {
-        precacheNextImage(currentIndex.value + 1);
-      });
+      // Skip precaching for single-asset views (like external files from cold start)
+      // This speeds up initial display significantly
+      if (totalAssets.value > 1) {
+        // Delay this a bit so we can finish loading the page
+        Timer(const Duration(milliseconds: 400), () {
+          precacheNextImage(currentIndex.value + 1);
+        });
+      }
 
       return null;
     }, const []);
 
     useEffect(() {
       final asset = loadAsset(currentIndex.value);
+
+      // Skip cast handling for external assets to speed up loading
+      if (ExternalAssetHelper.isExternalAsset(asset)) {
+        return null;
+      }
 
       if (asset.isRemote) {
         ref.read(castProvider.notifier).loadMediaOld(asset, false);
@@ -240,6 +251,28 @@ class GalleryViewerPage extends HookConsumerWidget {
     }
 
     PhotoViewGalleryPageOptions buildVideo(BuildContext context, Asset asset) {
+      // For external videos, don't try to load a thumbnail as it will fail
+      // Just show a placeholder while the video player initializes
+      final Widget thumbnailWidget = ExternalAssetHelper.isExternalAsset(asset)
+          ? Container(
+              color: Colors.black,
+              child: const Center(
+                child: Icon(
+                  Icons.play_circle_outline,
+                  size: 64,
+                  color: Colors.white54,
+                ),
+              ),
+            )
+          : Image(
+              key: ValueKey(asset),
+              image: ImmichImage.imageProvider(asset: asset, width: context.width, height: context.height),
+              fit: BoxFit.contain,
+              height: context.height,
+              width: context.width,
+              alignment: Alignment.center,
+            );
+
       return PhotoViewGalleryPageOptions.customChild(
         onDragStart: (_, details, __, ___) => localPosition.value = details.localPosition,
         onDragUpdate: (_, details, __) => handleSwipeUpDown(details),
@@ -255,14 +288,7 @@ class GalleryViewerPage extends HookConsumerWidget {
           child: NativeVideoViewerPage(
             key: getVideoPlayerKey(asset.id),
             asset: asset,
-            image: Image(
-              key: ValueKey(asset),
-              image: ImmichImage.imageProvider(asset: asset, width: context.width, height: context.height),
-              fit: BoxFit.contain,
-              height: context.height,
-              width: context.width,
-              alignment: Alignment.center,
-            ),
+            image: thumbnailWidget,
           ),
         ),
       );
@@ -285,9 +311,18 @@ class GalleryViewerPage extends HookConsumerWidget {
       return buildVideo(context, newAsset);
     }
 
+    final wasColdStartViaIntent = ref.watch(wasColdStartViaIntentProvider);
+
     return PopScope(
-      // Change immersive mode back to normal "edgeToEdge" mode
-      onPopInvokedWithResult: (didPop, _) => SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge),
+      canPop: !wasColdStartViaIntent,
+      onPopInvokedWithResult: (didPop, _) async {
+        SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+        // If app was cold-started via intent, exit the app instead of going to main screen
+        if (!didPop && wasColdStartViaIntent) {
+          // Pop was prevented, so we need to exit the app
+          await SystemNavigator.pop();
+        }
+      },
       child: Scaffold(
         backgroundColor: Colors.black,
         body: Stack(

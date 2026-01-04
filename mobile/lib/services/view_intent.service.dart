@@ -10,7 +10,7 @@ final viewIntentServiceProvider = Provider((ref) => ViewIntentService());
 class ViewIntentService {
   static const MethodChannel _intentChannel = MethodChannel('app.alextran.immich/intent');
 
-  void Function(String uri)? onViewIntent;
+  void Function(String uri, bool wasColdStart)? onViewIntent;
 
   void init() {
     if (!Platform.isAndroid) {
@@ -28,9 +28,10 @@ class ViewIntentService {
       try {
         final arguments = call.arguments as Map<dynamic, dynamic>;
         final uri = arguments['uri'] as String?;
+        final wasColdStart = arguments['wasColdStart'] as bool? ?? false;
         if (uri != null && uri.isNotEmpty) {
-          dPrint(() => "[ViewIntentService] Received VIEW intent with URI: $uri");
-          onViewIntent?.call(uri);
+          dPrint(() => "[ViewIntentService] Received VIEW intent with URI: $uri (coldStart: $wasColdStart)");
+          onViewIntent?.call(uri, wasColdStart);
         } else {
           dPrint(() => "[ViewIntentService] ERROR: URI is null or empty");
         }

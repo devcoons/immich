@@ -18,6 +18,7 @@ import 'package:immich_mobile/services/api.service.dart';
 import 'package:immich_mobile/services/app_settings.service.dart';
 import 'package:immich_mobile/services/asset.service.dart';
 import 'package:immich_mobile/utils/debounce.dart';
+import 'package:immich_mobile/utils/external_asset.dart';
 import 'package:immich_mobile/utils/hooks/interval_hook.dart';
 import 'package:immich_mobile/widgets/asset_viewer/custom_video_player_controls.dart';
 import 'package:logging/logging.dart';
@@ -70,6 +71,36 @@ class NativeVideoViewerPage extends HookConsumerWidget {
       }
 
       try {
+        // Check if this is an external asset from a third-party app
+        if (ExternalAssetHelper.isExternalAsset(asset)) {
+          final uri = ExternalAssetHelper.getUri(asset);
+          if (uri == null) {
+            throw Exception('External asset has no URI');
+          }
+
+          final parsedUri = Uri.parse(uri);
+          if (parsedUri.scheme == 'file') {
+            // Direct file path for external video
+            final filePath = parsedUri.path;
+            final source = await VideoSource.init(path: filePath, type: VideoSourceType.file);
+            return source;
+          } else if (parsedUri.scheme == 'content') {
+            // Content URIs need to be copied to a temporary file first
+            // because the native video player can't access them directly
+            log.info('Copying content URI video to temporary file for playback');
+            final tempPath = await ExternalAssetHelper.copyContentUriToTempFile(uri, asset.fileName);
+            if (tempPath == null) {
+              throw Exception('Failed to copy content URI video to temporary file');
+            }
+            log.info('Content URI video copied to: $tempPath');
+            final source = await VideoSource.init(path: tempPath, type: VideoSourceType.file);
+            return source;
+          } else {
+            throw Exception('Unsupported URI scheme for external video: ${parsedUri.scheme}');
+          }
+        }
+
+        // Normal Immich asset handling
         final local = asset.local;
         if (local != null && asset.livePhotoVideoId == null) {
           final file = await local.file;
@@ -110,10 +141,31 @@ class NativeVideoViewerPage extends HookConsumerWidget {
         return null;
       }
 
+      // For external assets, try to get the aspect ratio from the video metadata
+      if (ExternalAssetHelper.isExternalAsset(asset)) {
+        final uri = ExternalAssetHelper.getUri(asset);
+        if (uri != null && asset.isVideo) {
+          try {
+            final videoAspectRatio = await ExternalAssetHelper.getVideoAspectRatio(uri);
+            if (videoAspectRatio != null) {
+              aspectRatio.value = videoAspectRatio;
+              return null;
+            }
+          } catch (error) {
+            log.warning('Could not get video aspect ratio for external asset: $error');
+          }
+        }
+        // Use a default 16:9 aspect ratio if we can't get it from metadata
+        aspectRatio.value = 16.0 / 9.0;
+        return null;
+      }
+
       try {
         aspectRatio.value = await ref.read(assetServiceProvider).getAspectRatio(asset);
       } catch (error) {
         log.severe('Error getting aspect ratio for asset ${asset.fileName}: $error');
+        // Use a fallback aspect ratio if we can't get it
+        aspectRatio.value = 16.0 / 9.0;
       }
     });
 
@@ -195,9 +247,17 @@ class NativeVideoViewerPage extends HookConsumerWidget {
       if (videoPlayback.state == VideoPlaybackState.playing) {
         // Sync with the controls playing
         WakelockPlus.enable();
+        // Ensure controls provider is in sync
+        if (ref.read(videoPlayerControlsProvider).pause) {
+          ref.read(videoPlayerControlsProvider.notifier).play();
+        }
       } else {
         // Sync with the controls pause
         WakelockPlus.disable();
+        // Ensure controls provider is in sync
+        if (!ref.read(videoPlayerControlsProvider).pause && videoPlayback.state == VideoPlaybackState.paused) {
+          ref.read(videoPlayerControlsProvider.notifier).pause();
+        }
       }
 
       ref.read(videoPlaybackValueProvider.notifier).status = videoPlayback.state;
@@ -343,8 +403,12 @@ class NativeVideoViewerPage extends HookConsumerWidget {
     }, const []);
 
     useOnAppLifecycleStateChange((_, state) async {
-      if (state == AppLifecycleState.resumed && shouldPlayOnForeground.value) {
-        await controller.value?.play();
+      if (state == AppLifecycleState.resumed) {
+        if (shouldPlayOnForeground.value) {
+          await controller.value?.play();
+          // Sync the controls provider state with the actual playback state
+          ref.read(videoPlayerControlsProvider.notifier).play();
+        }
       } else if (state == AppLifecycleState.paused) {
         final videoPlaying = await controller.value?.isPlaying();
         if (videoPlaying ?? true) {

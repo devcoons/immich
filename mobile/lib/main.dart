@@ -209,27 +209,40 @@ class ImmichAppState extends ConsumerState<ImmichApp> with WidgetsBindingObserve
   initState() {
     super.initState();
     initApp().then((_) => dPrint(() => "App Init Completed"));
+
+    // Initialize view intent first to determine if this is a cold start
+    ref.read(viewIntentProvider).init();
+
+    // Defer background services initialization until after first frame
+    // This speeds up external file viewing significantly
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      // needs to be delayed so that EasyLocalization is working
-      if (Store.isBetaTimelineEnabled) {
-        ref.read(backgroundServiceProvider).disableService();
-        ref.read(backgroundWorkerFgServiceProvider).enable();
-        if (Platform.isAndroid) {
-          ref
-              .read(backgroundWorkerFgServiceProvider)
-              .saveNotificationMessage(
-                IntlKeys.uploading_media.t(),
-                IntlKeys.backup_background_service_default_notification.t(),
-              );
+      // Skip background services if app was cold-started via external intent
+      // These are not needed for just viewing external files
+      final wasColdStart = ref.read(wasColdStartViaIntentProvider);
+      if (!wasColdStart) {
+        // needs to be delayed so that EasyLocalization is working
+        if (Store.isBetaTimelineEnabled) {
+          ref.read(backgroundServiceProvider).disableService();
+          ref.read(backgroundWorkerFgServiceProvider).enable();
+          if (Platform.isAndroid) {
+            ref
+                .read(backgroundWorkerFgServiceProvider)
+                .saveNotificationMessage(
+                  IntlKeys.uploading_media.t(),
+                  IntlKeys.backup_background_service_default_notification.t(),
+                );
+          }
+        } else {
+          ref.read(backgroundWorkerFgServiceProvider).disable();
+          ref.read(backgroundServiceProvider).resumeServiceIfEnabled();
         }
+
+        // Share intent upload is also not needed for external viewing
+        ref.read(shareIntentUploadProvider.notifier).init();
       } else {
-        ref.read(backgroundWorkerFgServiceProvider).disable();
-        ref.read(backgroundServiceProvider).resumeServiceIfEnabled();
+        dPrint(() => "[INIT] Skipping background services for external file view");
       }
     });
-
-    ref.read(shareIntentUploadProvider.notifier).init();
-    ref.read(viewIntentProvider).init();
   }
 
   @override

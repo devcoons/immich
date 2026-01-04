@@ -21,6 +21,7 @@ import 'package:immich_mobile/providers/server_info.provider.dart';
 import 'package:immich_mobile/providers/user.provider.dart';
 import 'package:immich_mobile/routing/router.dart';
 import 'package:immich_mobile/services/stack.service.dart';
+import 'package:immich_mobile/utils/external_asset.dart';
 import 'package:immich_mobile/utils/hash.dart';
 import 'package:immich_mobile/widgets/asset_grid/asset_grid_data_structure.dart';
 import 'package:immich_mobile/widgets/asset_grid/delete_dialog.dart';
@@ -53,6 +54,10 @@ class BottomGalleryBar extends ConsumerWidget {
     if (asset == null) {
       return const SizedBox();
     }
+
+    // Check if this is an external asset (from third-party app)
+    final isExternalAsset = ExternalAssetHelper.isExternalAsset(asset);
+
     final isOwner = asset.ownerId == fastHash(ref.watch(currentUserProvider)?.id ?? '');
     final showControls = ref.watch(showControlsProvider);
     final stackId = asset.stackId;
@@ -246,15 +251,18 @@ class BottomGalleryBar extends ConsumerWidget {
     }
 
     final List<Map<BottomNavigationBarItem, Function(int)>> albumActions = [
-      {
-        BottomNavigationBarItem(
-          icon: Icon(Platform.isAndroid ? Icons.share_rounded : Icons.ios_share_rounded),
-          label: 'share'.tr(),
-          tooltip: 'share'.tr(),
-        ): (_) =>
-            shareAsset(),
-      },
-      if (asset.isImage && !isInLockedView)
+      // Share is available for all assets including external
+      if (!isExternalAsset || asset.isLocal) // Only show share if it's not external or if external is a local file
+        {
+          BottomNavigationBarItem(
+            icon: Icon(Platform.isAndroid ? Icons.share_rounded : Icons.ios_share_rounded),
+            label: 'share'.tr(),
+            tooltip: 'share'.tr(),
+          ): (_) =>
+              shareAsset(),
+        },
+      // Edit is only available for Immich assets (requires database)
+      if (!isExternalAsset && asset.isImage && !isInLockedView)
         {
           BottomNavigationBarItem(
             icon: const Icon(Icons.tune_outlined),
@@ -263,7 +271,8 @@ class BottomGalleryBar extends ConsumerWidget {
           ): (_) =>
               handleEdit(),
         },
-      if (isOwner && !isInLockedView)
+      // Archive/unarchive is only for Immich assets
+      if (!isExternalAsset && isOwner && !isInLockedView)
         {
           asset.isArchived
               ? BottomNavigationBarItem(
@@ -278,7 +287,8 @@ class BottomGalleryBar extends ConsumerWidget {
                 ): (_) =>
               handleArchive(),
         },
-      if (isOwner && asset.stackCount > 0 && !isInLockedView)
+      // Stack management is only for Immich assets
+      if (!isExternalAsset && isOwner && asset.stackCount > 0 && !isInLockedView)
         {
           BottomNavigationBarItem(
             icon: const Icon(Icons.burst_mode_outlined),
@@ -287,7 +297,8 @@ class BottomGalleryBar extends ConsumerWidget {
           ): (_) =>
               showStackActionItems(),
         },
-      if (isOwner && !isInAlbum)
+      // Delete is only for Immich assets (external assets can't be deleted from third-party apps)
+      if (!isExternalAsset && isOwner && !isInAlbum)
         {
           BottomNavigationBarItem(
             icon: const Icon(Icons.delete_outline),
@@ -296,7 +307,8 @@ class BottomGalleryBar extends ConsumerWidget {
           ): (_) =>
               handleDelete(),
         },
-      if (!isOwner)
+      // Download is available for remote assets only (not external or local-only)
+      if (!isExternalAsset && !isOwner)
         {
           BottomNavigationBarItem(
             icon: const Icon(Icons.download_outlined),
@@ -305,7 +317,8 @@ class BottomGalleryBar extends ConsumerWidget {
           ): (_) =>
               handleDownload(),
         },
-      if (isInAlbum)
+      // Album removal is only for Immich assets
+      if (!isExternalAsset && isInAlbum)
         {
           BottomNavigationBarItem(
             icon: const Icon(Icons.remove_circle_outline),
@@ -315,6 +328,38 @@ class BottomGalleryBar extends ConsumerWidget {
               handleRemoveFromAlbum(),
         },
     ];
+
+    // BottomNavigationBar requires at least 2 items, so hide it for external assets
+    // or if there are fewer than 2 actions available
+    if (albumActions.length < 2) {
+      return IgnorePointer(
+        ignoring: !showControls,
+        child: AnimatedOpacity(
+          duration: const Duration(milliseconds: 100),
+          opacity: showControls ? 1.0 : 0.0,
+          child: DecoratedBox(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.bottomCenter,
+                end: Alignment.topCenter,
+                colors: [Colors.black, Colors.transparent],
+              ),
+            ),
+            position: DecorationPosition.background,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 40.0, bottom: 16.0),
+              child: Column(
+                children: [
+                  if (asset.isVideo) const VideoControls(),
+                  // No bottom navigation bar for external assets or insufficient actions
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     return IgnorePointer(
       ignoring: !showControls,
       child: AnimatedOpacity(
