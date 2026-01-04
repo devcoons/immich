@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:immich_mobile/utils/debug_print.dart';
+import 'package:native_video_player/native_video_player.dart';
 import 'package:path/path.dart' as p;
 
 @RoutePage()
@@ -66,7 +67,30 @@ class ExternalFileViewerPage extends HookConsumerWidget {
                 if (!isMounted) return;
                 imageBytes.value = bytes;
 
-                // Decode the image immediately to avoid issues with widget rebuilds
+                // First, try to get the path to determine file type
+                try {
+                  path = await platform.invokeMethod('getPathFromUri', {'uri': uri});
+                  dPrint(() => "[ExternalFileViewer] Got path from content URI: $path");
+
+                  // Check if it's a video based on extension
+                  if (path != null) {
+                    final extension = p.extension(path).toLowerCase();
+                    if (['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'].contains(extension)) {
+                      dPrint(() => "[ExternalFileViewer] Detected video file: $extension");
+                      isVideo.value = true;
+                      filePath.value = path;
+                      if (isMounted) {
+                        isLoading.value = false;
+                      }
+                      return; // Skip image decoding for videos
+                    }
+                  }
+                } catch (e) {
+                  dPrint(() => "[ExternalFileViewer] Could not get path from content URI: $e");
+                  // Continue with image decode attempt
+                }
+
+                // Decode as image (only if not a video)
                 dPrint(() => "[ExternalFileViewer] Decoding image from ${bytes?.length ?? 0} bytes");
                 try {
                   final codec = await ui.instantiateImageCodec(bytes);
@@ -77,6 +101,13 @@ class ExternalFileViewerPage extends HookConsumerWidget {
                   }
                   decodedImage.value = frame.image;
                   dPrint(() => "[ExternalFileViewer] Image decoded successfully: ${frame.image.width}x${frame.image.height}");
+
+                  // Set the file path if we have it
+                  if (path != null) {
+                    filePath.value = path;
+                  } else {
+                    filePath.value = "content_uri_image";
+                  }
                 } catch (e) {
                   dPrint(() => "[ExternalFileViewer] Failed to decode image: $e");
                   if (isMounted) {
@@ -84,21 +115,6 @@ class ExternalFileViewerPage extends HookConsumerWidget {
                     isLoading.value = false;
                   }
                   return;
-                }
-
-                // Still try to get the path for extension detection
-                try {
-                  path = await platform.invokeMethod('getPathFromUri', {'uri': uri});
-                  dPrint(() => "[ExternalFileViewer] Also got path: $path");
-                  if (path != null) {
-                    filePath.value = path;
-                  } else {
-                    filePath.value = "content_uri_image";
-                  }
-                } catch (e) {
-                  dPrint(() => "[ExternalFileViewer] Could not get path, but have decoded image: $e");
-                  // We have decoded image, so we can still display it
-                  filePath.value = "content_uri_image";
                 }
               } else {
                 error.value = "Unable to read file from content URI";
@@ -239,39 +255,12 @@ class ExternalFileViewerPage extends HookConsumerWidget {
       );
     }
 
-    // For videos, show a message that videos are not yet supported
+    // For videos, use native video player
     if (isVideo.value) {
-      dPrint(() => "[ExternalFileViewer] Rendering video not supported message for: $path");
-      return Scaffold(
-        backgroundColor: Colors.black,
-        appBar: AppBar(
-          backgroundColor: Colors.black,
-          foregroundColor: Colors.white,
-        ),
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Icon(
-                Icons.videocam_off,
-                color: Colors.white,
-                size: 64,
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'Video playback from external sources\nis not yet supported',
-                style: TextStyle(color: Colors.white),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 8),
-              Text(
-                path,
-                style: const TextStyle(color: Colors.grey, fontSize: 12),
-                textAlign: TextAlign.center,
-              ),
-            ],
-          ),
-        ),
+      dPrint(() => "[ExternalFileViewer] Rendering video player for: $path");
+      return _ExternalVideoPlayer(
+        filePath: path,
+        fileBytes: imageBytes.value,
       );
     }
 
@@ -424,5 +413,213 @@ class ExternalFileViewerPage extends HookConsumerWidget {
         ),
       );
     }
+  }
+}
+
+// Simple video player for external files
+class _ExternalVideoPlayer extends HookWidget {
+  final String filePath;
+  final Uint8List? fileBytes;
+
+  const _ExternalVideoPlayer({
+    required this.filePath,
+    this.fileBytes,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = useState<NativeVideoPlayerController?>(null);
+    final isReady = useState(false);
+    final error = useState<String?>(null);
+    final videoInfo = useState<VideoInfo?>(null);
+    final isPlaying = useState(false);
+    final showControls = useState(true);
+
+    useEffect(() {
+      dPrint(() => "[ExternalVideoPlayer] Initializing video player for: $filePath");
+
+      return () {
+        dPrint(() => "[ExternalVideoPlayer] Cleaning up video player");
+        controller.value?.stop();
+      };
+    }, [filePath]);
+
+    void initController(NativeVideoPlayerController nc) async {
+      if (controller.value != null) {
+        return;
+      }
+
+      dPrint(() => "[ExternalVideoPlayer] Controller ready, loading video");
+
+      try {
+        VideoSource source;
+
+        if (filePath == "content_uri_image" || filePath.startsWith("content://")) {
+          error.value = "Cannot play video from content URI";
+          return;
+        }
+
+        source = await VideoSource.init(
+          path: filePath,
+          type: VideoSourceType.file,
+        );
+
+        nc.onPlaybackReady.addListener(() {
+          dPrint(() => "[ExternalVideoPlayer] Video playback ready");
+          final info = nc.videoInfo;
+          if (info != null) {
+            videoInfo.value = info;
+            dPrint(() => "[ExternalVideoPlayer] Video size: ${info.width}x${info.height}");
+          }
+          isReady.value = true;
+          nc.play();
+          isPlaying.value = true;
+        });
+
+        nc.onPlaybackStatusChanged.addListener(() {
+          final playbackInfo = nc.playbackInfo;
+          if (playbackInfo != null) {
+            isPlaying.value = playbackInfo.status == PlaybackStatus.playing;
+          }
+        });
+
+        nc.onError.addListener(() {
+          dPrint(() => "[ExternalVideoPlayer] Video playback error");
+          error.value = "Video playback error";
+        });
+
+        await nc.loadVideoSource(source);
+        controller.value = nc;
+
+        dPrint(() => "[ExternalVideoPlayer] Video loaded successfully");
+      } catch (e) {
+        dPrint(() => "[ExternalVideoPlayer] Error loading video: $e");
+        error.value = "Failed to load video: $e";
+      }
+    }
+
+    if (error.value != null) {
+      return Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+          backgroundColor: Colors.black,
+          foregroundColor: Colors.white,
+          title: const Text('External Video'),
+        ),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(
+                  Icons.error_outline,
+                  color: Colors.white,
+                  size: 64,
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  error.value!,
+                  style: const TextStyle(color: Colors.white),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    final info = videoInfo.value;
+    final aspectRatio = info != null && info.width > 0 && info.height > 0
+        ? info.width / info.height
+        : 16 / 9; // Default aspect ratio
+
+    void togglePlayPause() async {
+      final ctrl = controller.value;
+      if (ctrl == null) return;
+
+      try {
+        if (isPlaying.value) {
+          await ctrl.pause();
+        } else {
+          await ctrl.play();
+        }
+      } catch (e) {
+        dPrint(() => "[ExternalVideoPlayer] Error toggling play/pause: $e");
+      }
+    }
+
+    void restart() async {
+      final ctrl = controller.value;
+      if (ctrl == null) return;
+
+      try {
+        await ctrl.seekTo(0);
+        await ctrl.play();
+      } catch (e) {
+        dPrint(() => "[ExternalVideoPlayer] Error restarting video: $e");
+      }
+    }
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black87,
+        foregroundColor: Colors.white,
+        title: const Text('External Video'),
+      ),
+      body: SafeArea(
+        child: Center(
+          child: GestureDetector(
+            onTap: () {
+              showControls.value = !showControls.value;
+            },
+            child: AspectRatio(
+              aspectRatio: aspectRatio,
+              child: Stack(
+                children: [
+                  NativeVideoPlayerView(
+                    onViewReady: initController,
+                  ),
+                  if (!isReady.value)
+                    const Center(
+                      child: CircularProgressIndicator(color: Colors.white),
+                    ),
+                  // Video controls overlay
+                  if (isReady.value && showControls.value)
+                    Container(
+                      color: Colors.black26,
+                      child: Center(
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            // Restart button
+                            IconButton(
+                              icon: const Icon(Icons.replay, size: 40),
+                              color: Colors.white,
+                              onPressed: restart,
+                            ),
+                            const SizedBox(width: 20),
+                            // Play/Pause button
+                            IconButton(
+                              icon: Icon(
+                                isPlaying.value ? Icons.pause : Icons.play_arrow,
+                                size: 50,
+                              ),
+                              color: Colors.white,
+                              onPressed: togglePlayPause,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
