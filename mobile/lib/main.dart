@@ -19,6 +19,7 @@ import 'package:immich_mobile/extensions/build_context_extensions.dart';
 import 'package:immich_mobile/extensions/translate_extensions.dart';
 import 'package:immich_mobile/generated/codegen_loader.g.dart';
 import 'package:immich_mobile/generated/intl_keys.g.dart';
+import 'package:immich_mobile/pages/common/external_file_viewer.page.dart';
 import 'package:immich_mobile/platform/background_worker_lock_api.g.dart';
 import 'package:immich_mobile/providers/app_life_cycle.provider.dart';
 import 'package:immich_mobile/providers/asset_viewer/share_intent_upload.provider.dart';
@@ -34,6 +35,7 @@ import 'package:immich_mobile/routing/router.dart';
 import 'package:immich_mobile/services/background.service.dart';
 import 'package:immich_mobile/services/deep_link.service.dart';
 import 'package:immich_mobile/services/local_notification.service.dart';
+import 'package:immich_mobile/services/view_intent.service.dart';
 import 'package:immich_mobile/theme/dynamic_theme.dart';
 import 'package:immich_mobile/theme/theme_data.dart';
 import 'package:immich_mobile/utils/bootstrap.dart';
@@ -49,25 +51,68 @@ import 'package:timezone/data/latest.dart';
 
 void main() async {
   ImmichWidgetsBinding();
-  unawaited(BackgroundWorkerLockService(BackgroundWorkerLockApi()).lock());
-  final (isar, drift, logDb) = await Bootstrap.initDB();
-  await Bootstrap.initDomain(isar, drift, logDb);
-  await initApp();
-  // Warm-up isolate pool for worker manager
-  await workerManagerPatch.init(dynamicSpawning: true, isolatesCount: max(Platform.numberOfProcessors - 1, 5));
-  await migrateDatabaseIfNeeded(isar, drift);
-  HttpSSLOptions.apply();
 
-  runApp(
-    ProviderScope(
-      overrides: [
-        dbProvider.overrideWithValue(isar),
-        isarProvider.overrideWithValue(isar),
-        driftProvider.overrideWith(driftOverride(drift)),
-      ],
-      child: const MainWidget(),
-    ),
-  );
+  // Check if this is a cold start via external intent BEFORE doing heavy initialization
+  bool isColdStartViaIntent = false;
+  if (Platform.isAndroid) {
+    try {
+      const platform = MethodChannel('app.alextran.immich/intent');
+      isColdStartViaIntent = await platform.invokeMethod<bool>('isColdStartViaIntent') ?? false;
+      if (isColdStartViaIntent) {
+        dPrint(() => "[MAIN] Detected cold start via intent - using fast path");
+      }
+    } catch (e) {
+      dPrint(() => "[MAIN] Could not check intent status: $e");
+    }
+  }
+
+  if (!isColdStartViaIntent) {
+    // Normal startup - full initialization
+    unawaited(BackgroundWorkerLockService(BackgroundWorkerLockApi()).lock());
+    final (isar, drift, logDb) = await Bootstrap.initDB();
+    await Bootstrap.initDomain(isar, drift, logDb);
+    await initApp();
+    await workerManagerPatch.init(dynamicSpawning: true, isolatesCount: max(Platform.numberOfProcessors - 1, 5));
+    await migrateDatabaseIfNeeded(isar, drift);
+    HttpSSLOptions.apply();
+
+    runApp(
+      ProviderScope(
+        overrides: [
+          dbProvider.overrideWithValue(isar),
+          isarProvider.overrideWithValue(isar),
+          driftProvider.overrideWith(driftOverride(drift)),
+        ],
+        child: const MainWidget(),
+      ),
+    );
+  } else {
+    // FAST PATH for external viewing - SKIP database entirely!
+    dPrint(() => "[MAIN] Fast path: INSTANT initialization for external file viewing");
+
+    // ONLY minimal initialization - no database, no domain, nothing heavy
+    final stopwatch = Stopwatch()..start();
+    await initAppMinimal();
+    dPrint(() => "[MAIN] Fast path: initAppMinimal took ${stopwatch.elapsedMilliseconds}ms");
+
+   // HttpSSLOptions.apply();
+    dPrint(() => "[MAIN] Fast path: Launching app NOW (no database initialization)");
+
+    // Launch app IMMEDIATELY without any database
+    // AppSettingsService now safely returns defaults when Store isn't initialized
+    runApp(
+      ProviderScope(
+        overrides: [
+          wasColdStartViaIntentProvider.overrideWith((ref) => true),
+          // NO database providers - app will use defaults
+        ],
+        child: const ExternalIntentApp(),
+      ),
+    );
+
+    dPrint(() => "[MAIN] Fast path: App launched in ${stopwatch.elapsedMilliseconds}ms total");
+
+  }
 }
 
 Future<void> initApp() async {
@@ -122,6 +167,38 @@ Future<void> initApp() async {
   });
 }
 
+/// Minimal initialization for external file viewing (fast path)
+Future<void> initAppMinimal() async {
+  // Only initialize what's absolutely necessary for viewing external files
+  await EasyLocalization.ensureInitialized();
+  await initializeDateFormatting();
+
+  // Error logging is still important
+  final log = Logger("ImmichErrorLogger");
+
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    log.severe(
+      'FlutterError - Catch all',
+      "${details.toString()}\nException: ${details.exception}\nLibrary: ${details.library}\nContext: ${details.context}",
+      details.stack,
+    );
+  };
+
+  PlatformDispatcher.instance.onError = (error, stack) {
+    log.severe('PlatformDispatcher - Catch all', error, stack);
+    return true;
+  };
+
+  // Skip: DynamicTheme (not needed initially)
+  // Skip: FlutterDisplayMode (not critical)
+  // Skip: initializeTimeZones (not needed for viewing)
+  // Skip: FileDownloader (not needed for external viewing)
+  // Skip: LicenseRegistry (not needed for viewing)
+
+  dPrint(() => "[INIT] Minimal app init completed for external file viewing");
+}
+
 class ImmichApp extends ConsumerStatefulWidget {
   const ImmichApp({super.key});
 
@@ -132,6 +209,12 @@ class ImmichApp extends ConsumerStatefulWidget {
 class ImmichAppState extends ConsumerState<ImmichApp> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    final wasColdStartViaIntent = ref.read(wasColdStartViaIntentProvider);
+    if (wasColdStartViaIntent) {
+      dPrint(() => "[APP STATE] $state (cold start) - skipping lifecycle handlers");
+      return;
+    }
+
     switch (state) {
       case AppLifecycleState.resumed:
         dPrint(() => "[APP STATE] resumed");
@@ -288,6 +371,47 @@ class MainWidget extends StatelessWidget {
       fallbackLocale: locales.values.first,
       assetLoader: const CodegenLoader(),
       child: const ImmichApp(),
+    );
+  }
+}
+
+class ExternalIntentApp extends ConsumerStatefulWidget {
+  const ExternalIntentApp({super.key});
+
+  @override
+  ConsumerState<ExternalIntentApp> createState() => _ExternalIntentAppState();
+}
+
+class _ExternalIntentAppState extends ConsumerState<ExternalIntentApp> {
+  String? _uri;
+
+  @override
+  void initState() {
+    super.initState();
+    final service = ref.read(viewIntentServiceProvider);
+    service.onViewIntent = (uri, wasColdStart) {
+      if (!mounted) return;
+      setState(() {
+        _uri = uri;
+      });
+    };
+    service.init();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Immich',
+      debugShowCheckedModeBanner: true,
+      theme: ThemeData.dark(),
+      home: _uri == null
+          ? const Scaffold(
+              backgroundColor: Colors.black,
+              body: Center(
+                child: CircularProgressIndicator(color: Colors.white),
+              ),
+            )
+          : ExternalFileViewerPage(uri: _uri!),
     );
   }
 }

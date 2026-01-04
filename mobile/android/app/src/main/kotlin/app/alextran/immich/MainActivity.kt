@@ -79,6 +79,9 @@ class MainActivity : FlutterFragmentActivity() {
     // Set up method call handler for getting file paths from content URIs
     intentChannel?.setMethodCallHandler { call, result ->
       when (call.method) {
+        "isColdStartViaIntent" -> {
+          result.success(wasColdStartedViaIntent)
+        }
         "getPathFromUri" -> {
           val uriString = call.argument<String>("uri")
           if (uriString != null) {

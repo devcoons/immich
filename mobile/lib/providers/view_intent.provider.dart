@@ -34,8 +34,8 @@ class ViewIntentNotifier {
     dPrint(() => "[ViewIntentNotifier] Handling VIEW intent for URI: $uriString (coldStart: $wasColdStart)");
 
     try {
-      // Track if the app was cold-started via intent
-      if (wasColdStart) {
+      // Track if the app was cold-started via intent (if not already set in main())
+      if (wasColdStart && !_ref.read(wasColdStartViaIntentProvider)) {
         _ref.read(wasColdStartViaIntentProvider.notifier).state = true;
         dPrint(() => "[ViewIntentNotifier] App was cold-started via intent - will exit on back press");
       }

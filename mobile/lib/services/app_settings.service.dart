@@ -66,10 +66,21 @@ enum AppSettingsEnum<T> {
 class AppSettingsService {
   const AppSettingsService();
   T getSetting<T>(AppSettingsEnum<T> setting) {
-    return Store.get(setting.storeKey, setting.defaultValue);
+    try {
+      return Store.get(setting.storeKey, setting.defaultValue);
+    } catch (e) {
+      // Store not initialized (e.g., cold start via external intent)
+      // Return default value
+      return setting.defaultValue;
+    }
   }
 
   Future<void> setSetting<T>(AppSettingsEnum<T> setting, T value) {
-    return Store.put(setting.storeKey, value);
+    try {
+      return Store.put(setting.storeKey, value);
+    } catch (e) {
+      // Store not initialized - ignore write, settings will use defaults
+      return Future.value();
+    }
   }
 }
